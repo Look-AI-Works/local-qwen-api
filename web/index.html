@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Qwen 本地对话台</title>
+  <style>
+    :root {
+      --ink: #18251f;
+      --muted: #52665b;
+      --green: #176448;
+      --line: #ced9d1;
+      --pale: #edf5ef;
+      color: var(--ink);
+      background: #f5f6f0;
+      font: 16px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { width: min(940px, calc(100% - 40px)); margin: 40px auto; }
+    h1, h2, p { margin: 0; }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .55; }
+    :focus-visible { outline: 3px solid #358163; outline-offset: 3px; }
+    .eyebrow, .tag, .method { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .intro { margin-bottom: 22px; }
+    .eyebrow { color: var(--green); font-size: .75rem; font-weight: 750; letter-spacing: .13em; }
+    h1 { margin: 4px 0 6px; font-size: clamp(1.9rem, 4vw, 2.9rem); line-height: 1.16; letter-spacing: -.04em; }
+    .intro p, .hint, .speaker { color: var(--muted); }
+    .desk { display: grid; grid-template-columns: minmax(0, 1fr) 244px; gap: 14px; align-items: start; }
+    .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+    .chat { box-shadow: 0 7px 28px #18342608; }
+    .chat-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+    h2 { font-size: 1rem; }
+    .quiet, .sample { color: var(--green); background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; font-size: .82rem; }
+    .quiet:hover:enabled, .sample:hover:enabled { background: var(--pale); }
+    .viewport { height: clamp(270px, 45vh, 480px); overflow-y: auto; padding: 20px; }
+    .empty { display: grid; place-content: center; justify-items: start; height: 100%; color: var(--muted); }
+    [hidden] { display: none !important; }
+    .empty strong { color: var(--ink); font-size: 1.15rem; }
+    .empty p { margin: 4px 0 12px; font-size: .88rem; }
+    .message + .message { margin-top: 17px; }
+    .speaker { font-size: .76rem; font-weight: 700; margin-bottom: 4px; }
+    .reply { width: fit-content; max-width: 100%; border-radius: 10px; padding: 7px 11px; background: #f3f5f1; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .from-user .reply { background: var(--pale); color: #194831; }
+    form { padding: 15px 18px; border-top: 1px solid var(--line); }
+    label { display: block; margin-bottom: 5px; font-size: .83rem; font-weight: 700; }
+    textarea, input { width: 100%; border: 1px solid #afc0b3; border-radius: 8px; padding: 9px 11px; color: var(--ink); background: white; }
+    textarea { display: block; min-height: 72px; resize: vertical; }
+    textarea::placeholder, input::placeholder { color: #68766e; }
+    .actions { display: flex; gap: 10px; justify-content: space-between; align-items: center; margin-top: 9px; }
+    .hint { font-size: .78rem; }
+    .primary { border: 0; background: var(--green); color: white; border-radius: 8px; padding: 7px 16px; font-weight: 650; }
+    .primary:hover:enabled { background: #104c36; }
+    .settings { padding: 17px; }
+    .settings h2 { margin-bottom: 14px; }
+    .settings .hint { margin-top: 6px; }
+    .spec { padding-top: 13px; margin-top: 15px; border-top: 1px solid var(--line); }
+    .spec dt { color: var(--muted); font-size: .75rem; margin-top: 9px; }
+    .spec dd { margin: 2px 0; font-size: .84rem; }
+    .tag { display: inline-block; border-radius: 6px; background: var(--pale); color: var(--green); padding: 1px 6px; }
+    .method { overflow-wrap: anywhere; font-size: .77rem; }
+    .state { margin-top: 8px; font-size: .83rem; color: var(--green); }
+    .state:empty { margin: 0; }
+    .error { color: #9b3024; }
+    @media (max-width: 700px) {
+      main { width: min(100% - 24px, 540px); margin: 20px auto; }
+      .desk { display: flex; flex-direction: column; }
+      .panel { width: 100%; }
+      .settings { order: -1; padding: 12px 15px; }
+      .settings h2 { margin-bottom: 6px; }
+      .settings .spec { display: none; }
+      .viewport { height: 36vh; min-height: 200px; padding: 15px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="intro">
+      <span class="eyebrow" lang="en">QWEN / LOCAL</span>
+      <h1>Qwen 本地对话台</h1>
+      <p>从浏览器向运行 Ollama 的电脑提问，或接着上一条回答继续聊。</p>
+    </header>
+    <div class="desk">
+      <section class="panel chat" aria-labelledby="chat-title">
+        <div class="chat-head">
+          <h2 id="chat-title">当前对话</h2>
+          <button type="button" id="clear" class="quiet" disabled>清空对话</button>
+        </div>
+        <div class="viewport" id="viewport">
+          <div class="empty" id="empty">
+            <strong>从一个小问题开始</strong>
+            <p>在「连接设置」填入密钥，然后输入问题。</p>
+            <button id="sample" class="sample" type="button">试试「什么是模型推理？」</button>
+          </div>
+          <div id="log" role="log" aria-label="对话记录" aria-live="polite"></div>
+        </div>
+        <form id="form">
+          <label for="prompt">你的问题</label>
+          <textarea id="prompt" rows="2" maxlength="3000" placeholder="输入问题，或追问上一条回答…"></textarea>
+          <div class="actions">
+            <span class="hint">Enter 发送 · Shift + Enter 换行</span>
+            <button id="send" class="primary" type="submit">发送</button>
+          </div>
+          <p id="state" class="state" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <aside class="panel settings" aria-labelledby="settings-title">
+        <h2 id="settings-title">连接设置</h2>
+        <label for="key">API Key</label>
+        <input id="key" type="password" autocomplete="off" spellcheck="false" aria-describedby="key-hint" placeholder="粘贴服务提供者的密钥">
+        <p id="key-hint" class="hint">密钥和对话只保留在当前页面，刷新后清空。</p>
+        <dl class="spec">
+          <dt>推理模型</dt>
+          <dd><span class="tag">qwen2.5:1.5b</span></dd>
+          <dt>接口</dt>
+          <dd class="method">POST /v1/chat/completions</dd>
+          <dt>上下文</dt>
+          <dd>每次最多带上最近 8 轮。内容较长时会缩短上下文。</dd>
+        </dl>
+      </aside>
+    </div>
+  </main>
+  <script>
+    "use strict";
+    const el = (id) => document.getElementById(id);
+    const form = el("form"), promptBox = el("prompt"), keyBox = el("key");
+    const history = [];
+    let busy = false;
+
+    function status(text, error = false) {
+      el("state").textContent = text;
+      el("state").classList.toggle("error", error);
+    }
+    function showMessage(role, content) {
+      const row = document.createElement("div");
+      row.className = "message from-" + role;
+      const speaker = document.createElement("div");
+      speaker.className = "speaker";
+      speaker.textContent = role === "user" ? "你" : "Qwen";
+      const text = document.createElement("div");
+      text.className = "reply";
+      text.textContent = content;
+      row.append(speaker, text);
+      el("log").append(row);
+      el("viewport").scrollTop = el("viewport").scrollHeight;
+      return row;
+    }
+    function payload(question) {
+      const messages = [...history.slice(-16), {role: "user", content: question}];
+      const request = {model: "qwen2.5:1.5b", messages, stream: false, max_tokens: 256};
+      const encoder = new TextEncoder();
+      while (messages.length > 1 && encoder.encode(JSON.stringify(request)).length > 30000) {
+        messages.splice(0, 2);
+      }
+      return JSON.stringify(request);
+    }
+
+    const errors = {
+      400: "问题或对话内容不符合接口要求，请缩短后重试。",
+      401: "密钥无效，请重新输入 API Key。",
+      413: "问题太长，请缩短后重试。",
+      429: "模型正在处理其他请求，请稍后重试。",
+      502: "无法连接本地模型，请确认 Ollama 已启动并已下载模型。",
+      503: "服务暂时不可用，请稍后重试。",
+      504: "模型响应超时，请稍后重试。"
+    };
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy) return;
+      const key = keyBox.value.trim(), question = promptBox.value.trim();
+      if (!key || !question) {
+        status(!key ? "请先输入 API Key。" : "请先输入问题。", true);
+        (!key ? keyBox : promptBox).focus();
+        return;
+      }
+      busy = true;
+      el("send").disabled = el("clear").disabled = promptBox.readOnly = true;
+      el("empty").hidden = true;
+      const row = showMessage("user", question);
+      status("模型正在生成回答…");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 110000);
+      try {
+        const response = await fetch("/v1/chat/completions", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", Authorization: "Bearer " + key},
+          body: payload(question),
+          signal: controller.signal,
+          credentials: "omit",
+          redirect: "error"
+        });
+        if (!response.ok) {
+          if (response.status === 401) keyBox.focus();
+          throw new Error(errors[response.status] || "请求失败（HTTP " + response.status + "）。");
+        }
+        const answer = (await response.json()).choices?.[0]?.message?.content;
+        if (typeof answer !== "string" || !answer.trim()) throw new Error("接口返回了空回答，请重试。");
+        history.push({role: "user", content: question}, {role: "assistant", content: answer});
+        if (history.length > 16) history.splice(0, 2);
+        showMessage("assistant", answer);
+        promptBox.value = "";
+        status("");
+      } catch (error) {
+        row.remove();
+        el("empty").hidden = history.length > 0;
+        const network = error.name === "AbortError" || error instanceof TypeError;
+        status(network ? "连接超时或中断，请确认服务在线后重试。" : error.message, true);
+      } finally {
+        clearTimeout(timeout);
+        busy = el("send").disabled = promptBox.readOnly = false;
+        el("clear").disabled = history.length === 0;
+      }
+    });
+    promptBox.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    el("sample").addEventListener("click", () => {
+      promptBox.value = "什么是模型推理？请举一个日常生活中的例子。";
+      (keyBox.value.trim() ? promptBox : keyBox).focus();
+    });
+    el("clear").addEventListener("click", () => {
+      if (busy) return;
+      history.length = 0;
+      el("log").replaceChildren();
+      el("empty").hidden = false;
+      el("clear").disabled = true;
+      promptBox.value = "";
+      status("对话已清空。");
+      promptBox.focus();
+    });
+  </script>
+</body>
+</html>
