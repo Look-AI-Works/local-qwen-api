@@ -2,6 +2,7 @@
 import argparse
 import getpass
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -67,6 +68,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.name == "nt" and sys.stdout is not None and not sys.stdout.isatty():
+        # Keep redirected chat transcripts readable across Windows code pages.
+        sys.stdout.reconfigure(encoding="utf-8")
     try:
         main()
     except (KeyboardInterrupt, EOFError):

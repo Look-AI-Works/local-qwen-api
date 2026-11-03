@@ -1,6 +1,15 @@
 # Local Qwen API
 
-在一台 Mac 上运行千问，先在终端和它聊天，再把同一个模型接到网页或分享给异地的朋友。模型权重保存在 Mac 上，推理也在 Mac 上完成。用浏览器访问时，朋友只需要网址和一把 API Key。
+在自己的 Mac 或 Windows 电脑上运行千问，用终端或网页连续对话，也可以把带密钥的 HTTPS 接口分享给异地的朋友。权重和推理都在部署模型的那台电脑上，另一端只需要网址和 API Key。
+
+**选择部署系统**
+
+| 系统 | 从哪里开始 | 固定域名的服务怎样启动 |
+| --- | --- | --- |
+| macOS · Apple Silicon | [下文的 Mac 教程](#安装模型) | 登录时由 LaunchAgent 启动 |
+| Windows 10 22H2 / Windows 11 | [Windows 完整部署指南（PowerShell）](docs/windows.md) | 登录时由 Windows 任务计划程序启动 |
+
+下面的安装与自启动命令以 macOS 为例。两个系统提供同一个聊天接口，调用方可以跨平台使用。
 
 | 我想做什么 | 从哪里开始 |
 | --- | --- |
@@ -178,4 +187,5 @@ launchctl bootout "gui/$(id -u)/com.localqwen.tunnel"
 | [server.py](server.py) | 提供网页、校验密钥、限制模型与并发，向本机 Ollama 转发聊天 |
 | [client.py](client.py) | 终端提示输入密钥，维护多轮问答历史 |
 | [web/index.html](web/index.html) | 无需构建的浏览器聊天界面 |
-| [ops/](ops/) | macOS 用户服务模板与安装脚本 |
+| [Windows 指南](docs/windows.md) | 安装模型、在 PowerShell 调用 API、临时与固定 HTTPS 分享及故障排查 |
+| [ops/](ops/) | macOS 用户服务模板与 Windows 登录任务安装脚本 |

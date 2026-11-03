@@ -8,6 +8,8 @@ import os
 import secrets
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,8 +23,7 @@ MAX_RESPONSE = 1024 * 1024
 INDEX = Path(__file__).resolve().parent / "web" / "index.html"
 
 
-def load_key(path):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+def posix_key(path):
     if not path.exists():
         # Publish a complete mode-0600 file, even if two servers start at once.
         with tempfile.NamedTemporaryFile(dir=path.parent) as tmp:
@@ -38,7 +39,68 @@ def load_key(path):
             raise ValueError("Key file must be a private regular file owned by you (chmod 600)")
         if info.st_size > 258:
             raise ValueError("API key file is too large")
-        key = source.read(258).removesuffix(b"\n").removesuffix(b"\r")
+        return source.read(258)
+
+
+def windows_key(path):
+    # Windows PowerShell 5.1 provides .NET Framework's ACL-aware FileStream.
+    # Paths and secret bytes are supplied separately from the command line.
+    command = r"""
+$ErrorActionPreference = 'Stop'
+$path = $env:LOCAL_QWEN_KEY_PATH
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+function Assert-PrivateKey($stream) {
+    $acl = $stream.GetAccessControl()
+    $sid = [Security.Principal.SecurityIdentifier]
+    $rules = $acl.GetAccessRules($true, $true, $sid)
+    $trusted = @($user.Value, 'S-1-5-18', 'S-1-5-32-544')  # user, SYSTEM, Administrators
+    $other = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $trusted }
+    if ($acl.GetOwner($sid).Value -ne $user.Value -or $rules.Count -eq 0 -or $other) {
+        throw 'API key must be owned by the current user and have a private Windows ACL.'
+    }
+}
+if (-not [IO.File]::Exists($path)) {
+    $temp = [IO.Path]::Combine([IO.Path]::GetDirectoryName($path), [IO.Path]::GetRandomFileName())
+    $acl = [Security.AccessControl.FileSecurity]::new()
+    $acl.SetOwner($user)
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'Allow'))
+    $outFile = [IO.FileStream]::new($temp, 'CreateNew', [Security.AccessControl.FileSystemRights]::FullControl,
+                                    'None', 4096, 'None', $acl)
+    try {
+        try {
+            Assert-PrivateKey $outFile
+            $key = [Text.Encoding]::ASCII.GetBytes([Console]::ReadLine() + [Environment]::NewLine)
+            $outFile.Write($key, 0, $key.Length)
+        } finally { $outFile.Dispose() }
+        try { [IO.File]::Move($temp, $path) }
+        catch [IO.IOException] { if (-not [IO.File]::Exists($path)) { throw } }
+    } finally { [IO.File]::Delete($temp) }
+}
+if ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) { throw 'Key cannot be a reparse point.' }
+$source = [IO.File]::OpenRead($path)
+try {
+    Assert-PrivateKey $source
+    if ($source.Length -gt 258) { throw 'API key file is too large.' }
+    $source.CopyTo([Console]::OpenStandardOutput())
+} finally { $source.Dispose() }
+"""
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    result = subprocess.run(
+        [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        env=dict(os.environ, LOCAL_QWEN_KEY_PATH=str(path.absolute())),
+        input=(secrets.token_urlsafe(32) + "\n").encode("ascii"),
+        capture_output=True,
+    )
+    if result.returncode:
+        raise ValueError("Cannot open a private Windows key file. Use your own LocalAppData on an ACL-capable volume.")
+    return result.stdout
+
+
+def load_key(path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    data = windows_key(path) if os.name == "nt" else posix_key(path)
+    key = data.removesuffix(b"\n").removesuffix(b"\r")
     if not 32 <= len(key) <= 256 or not all(33 <= char <= 126 for char in key):
         raise ValueError("Key must contain 32 to 256 printable non-space ASCII characters")
     return key
@@ -67,6 +129,13 @@ def chat_request(body):
 
 
 class Gateway(ThreadingHTTPServer):
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
     def __init__(self, address, bearer, index):
         super().__init__(address, ChatHandler)
         self.bearer = bearer
@@ -158,7 +227,12 @@ class ChatHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default=18435, type=int)
-    parser.add_argument("--key-file", type=Path, default=os.environ.get("QWEN_API_KEY_FILE") or "~/.config/local-qwen-api/api-key")
+    if os.name == "nt":
+        appdata = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData/Local"))
+        default_key = appdata / "LocalQwenApi/api-key"
+    else:
+        default_key = Path.home() / ".config/local-qwen-api/api-key"
+    parser.add_argument("--key-file", type=Path, default=os.environ.get("QWEN_API_KEY_FILE") or default_key)
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("Port must be between 1 and 65535")
@@ -176,4 +250,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.name == "nt" and sys.stdout is not None and not sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding="utf-8")
     main()
