@@ -1,0 +1,110 @@
+name: Windows gateway check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - server.py
+      - client.py
+      - web/index.html
+      - ops/install-windows.ps1
+      - .github/workflows/windows-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Parse the startup installer using Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'ops/install-windows.ps1').Path, [ref]$tokens, [ref]$errors)
+          if ($errors) { throw ($errors -join [Environment]::NewLine) }
+
+      - name: Exercise key creation, restart, UI, auth and chat forwarding on Windows
+        shell: python
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          import base64, contextlib, http.client, json, os, subprocess, sys, tempfile, threading, time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from pathlib import Path
+
+          class OllamaFixture(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  assert self.path == "/v1/chat/completions"
+                  data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                  assert data["model"] == "qwen2.5:1.5b"
+                  answer = data["messages"][-1]["content"]
+                  body = json.dumps({"choices": [{"message": {"role": "assistant", "content": answer}}]}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+          def request(port, method, path, body=None, token=None):
+              conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+              with contextlib.closing(conn):
+                  headers = {"Content-Type": "application/json"}
+                  if token:
+                      headers["Authorization"] = "Bearer " + token
+                  conn.request(method, path, json.dumps(body, ensure_ascii=False).encode() if body else None, headers)
+                  response = conn.getresponse()
+                  return response.status, response.read()
+
+          with tempfile.TemporaryDirectory() as tmp, ThreadingHTTPServer(("127.0.0.1", 11434), OllamaFixture) as upstream:
+              threading.Thread(target=upstream.serve_forever, daemon=True).start()
+              keyfile = Path(tmp) / "LocalQwenApi" / "api-key"
+              original_key = None
+              for port in (18435, 18436):
+                  env = dict(os.environ, LOCALAPPDATA=tmp)
+                  env.pop("QWEN_API_KEY_FILE", None)
+                  proc = subprocess.Popen([sys.executable, "-u", "server.py", "--port", str(port)], env=env)
+                  try:
+                      for _ in range(60):
+                          if proc.poll() is not None:
+                              raise RuntimeError(f"Gateway exited with status {proc.returncode}")
+                          try:
+                              status, page = request(port, "GET", "/")
+                              assert status == 200 and b"<html" in page.lower()
+                              break
+                          except OSError:
+                              time.sleep(0.25)
+                      else:
+                          raise RuntimeError("Gateway did not start")
+                      key = keyfile.read_text(encoding="ascii").strip()
+                      assert len(key) >= 32 and original_key in (None, key)
+                      original_key = key
+                      path = "/v1/chat/completions"
+                      body = {"model":"qwen2.5:1.5b", "messages":[{"role":"user","content":"中文接口检查"}], "stream":False}
+                      assert request(port, "POST", path, body)[0] == 401
+                      status, result = request(port, "POST", path, body, key)
+                      assert status == 200 and json.loads(result)["choices"][0]["message"]["content"] == "中文接口检查"
+                      if port == 18435:
+                          ps = """
+                          $ErrorActionPreference = 'Stop'
+                          $acl = Get-Acl -LiteralPath $env:TEST_KEY_FILE
+                          if (!$acl.AreAccessRulesProtected -or @($acl.Access).Count -ne 1) { throw 'Unexpected key ACL' }
+                          $key = (Get-Content -Raw -LiteralPath $env:TEST_KEY_FILE).Trim()
+                          $data = @{model='qwen2.5:1.5b'; messages=@(@{role='user';content='中文调用'}); stream=$false}
+                          $bytes = [Text.Encoding]::UTF8.GetBytes(($data | ConvertTo-Json -Depth 5 -Compress))
+                          $opts = @{Method='Post'; ContentType='application/json; charset=utf-8'; Body=$bytes}
+                          $response = Invoke-RestMethod @opts -Headers @{Authorization="Bearer $key"} -Uri 'http://127.0.0.1:18435/v1/chat/completions'
+                          if ($response.choices[0].message.content -cne '中文调用') { throw 'Unexpected chat response' }
+                          """
+                          encoded = base64.b64encode(ps.encode("utf-16le")).decode("ascii")
+                          subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                                         env=dict(env, TEST_KEY_FILE=str(keyfile)), check=True)
+                  finally:
+                      proc.terminate()
+                      proc.wait(timeout=10)
+              upstream.shutdown()
